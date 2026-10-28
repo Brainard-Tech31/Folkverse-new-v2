@@ -1,9 +1,4 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import type {
   Project,
   Scene,
@@ -14,6 +9,8 @@ import type {
   ShotProductionStatus,
 } from '../types/database.ts';
 import { SHOT_PRODUCTION_STATUSES } from '../types/database.ts';
+import { QualityControlSection } from './QualityControlSection.tsx';
+import { analyzeProjectQuality } from '../services/qualityControl.ts';
 import {
   Film,
   Camera,
@@ -32,6 +29,7 @@ import {
   ExternalLink,
   ChevronRight,
   Star,
+  ShieldAlert,
 } from 'lucide-react';
 
 interface ProductionDashboardViewProps {
@@ -44,6 +42,8 @@ interface ProductionDashboardViewProps {
   onOpenShotDetail: (shot: Shot) => void;
   onJumpToScenes: () => void;
   onJumpToShotPlanner: (sceneId?: string) => void;
+  onNavigateToTab?: (tab: 'scenes' | 'shots' | 'characters' | 'locations') => void;
+  defaultSubTab?: 'workflow' | 'quality';
 }
 
 export const ProductionDashboardView: React.FC<ProductionDashboardViewProps> = ({
@@ -56,10 +56,19 @@ export const ProductionDashboardView: React.FC<ProductionDashboardViewProps> = (
   onOpenShotDetail,
   onJumpToScenes,
   onJumpToShotPlanner,
+  onNavigateToTab,
+  defaultSubTab = 'workflow',
 }) => {
+  const [activeSubTab, setActiveSubTab] = useState<'workflow' | 'quality'>(defaultSubTab);
   const [statusFilter, setStatusFilter] = useState<'all' | ShotProductionStatus | 'missing_prompts' | 'missing_image' | 'missing_video'>('all');
   const [sceneFilter, setSceneFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Phase 3 Quality Control analysis
+  const qcReport = useMemo(() => {
+    return analyzeProjectQuality(project, scenes, shots, characters, locations, assets);
+  }, [project, scenes, shots, characters, locations, assets]);
+
 
   // Total runtime
   const totalSeconds = shots.reduce((acc, sh) => acc + (Number(sh.duration_seconds) || 0), 0);
@@ -158,9 +167,69 @@ export const ProductionDashboardView: React.FC<ProductionDashboardViewProps> = (
 
   return (
     <div className="space-y-6">
-      
-      {/* 1. Header Overview & KPI Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Phase 3 & Phase 4 Studio Sub-Navigation */}
+      <div className="flex items-center gap-2 border-b border-zinc-800 pb-4 text-xs font-medium">
+        <button
+          onClick={() => setActiveSubTab('workflow')}
+          className={`px-4 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 ${
+            activeSubTab === 'workflow'
+              ? 'bg-zinc-800 text-amber-400 font-bold border border-zinc-700 shadow-sm'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+          }`}
+        >
+          <Film className="w-3.5 h-3.5" />
+          <span>Production Execution</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300">
+            Phase 4
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('quality')}
+          className={`px-4 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 ${
+            activeSubTab === 'quality'
+              ? 'bg-zinc-800 text-amber-400 font-bold border border-zinc-700 shadow-sm'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+          }`}
+        >
+          <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+          <span>Quality & Continuity Control</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300">
+            Phase 3
+          </span>
+
+          {qcReport.summary.errorsCount > 0 ? (
+            <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
+              {qcReport.summary.errorsCount} err
+            </span>
+          ) : qcReport.summary.warningsCount > 0 ? (
+            <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              {qcReport.summary.warningsCount} warn
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              Pass
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeSubTab === 'quality' ? (
+        <QualityControlSection
+          project={project}
+          scenes={scenes}
+          shots={shots}
+          characters={characters}
+          locations={locations}
+          assets={assets}
+          onOpenShotDetail={onOpenShotDetail}
+          onNavigateToTab={onNavigateToTab}
+          onSelectSceneForShots={onJumpToShotPlanner}
+        />
+      ) : (
+        <>
+          {/* 1. Header Overview & KPI Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         
         {/* Total Shots & Runtime */}
         <div className="bg-[#141518] border border-zinc-800 rounded-xl p-4 space-y-1">
@@ -619,6 +688,8 @@ export const ProductionDashboardView: React.FC<ProductionDashboardViewProps> = (
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

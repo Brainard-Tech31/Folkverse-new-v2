@@ -27,6 +27,15 @@ import type {
   CreateShotInput,
   UpdateShotInput,
   FolkverseBlueprint,
+  Sequence,
+  SequenceEntry,
+  AudioTrack,
+  CreateSequenceInput,
+  UpdateSequenceInput,
+  CreateSequenceEntryInput,
+  UpdateSequenceEntryInput,
+  CreateAudioTrackInput,
+  UpdateAudioTrackInput,
 } from '../types/database.ts';
 
 /**
@@ -1317,3 +1326,540 @@ export async function createExternalAsset(input: {
   });
 }
 
+// ============================================================================
+// PHASE 5: PRODUCTION ASSEMBLY & FINAL CUT
+// ============================================================================
+
+/**
+ * Fetches all sequences for a project ordered by creation date.
+ */
+export async function fetchSequences(projectId: string): Promise<Sequence[]> {
+  if (!projectId) throw new Error('Project ID is required.');
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('sequences')
+    .select('*')
+    .eq('project_id', projectId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  return data || [];
+}
+
+/**
+ * Fetches a single sequence by ID.
+ */
+export async function fetchSequenceById(sequenceId: string): Promise<Sequence> {
+  if (!sequenceId) throw new Error('Sequence ID is required.');
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('sequences')
+    .select('*')
+    .eq('id', sequenceId)
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Sequence not found.');
+  }
+  return data;
+}
+
+/**
+ * Creates a new sequence, optionally populated with an initial ordered list of shot IDs.
+ */
+export async function createSequence(input: CreateSequenceInput): Promise<Sequence> {
+  if (!input.project_id) throw new Error('Project ID is required.');
+  const title = input.title?.trim();
+  if (!title) {
+    throw new Error('Sequence title is required and cannot be empty.');
+  }
+
+  const supabase = getSupabaseClient();
+  let userId: string | null = null;
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    if (authData?.user) {
+      userId = authData.user.id;
+    }
+  } catch {
+    // Session optional if RLS is bypassed in mock
+  }
+
+  const sequencePayload: Record<string, unknown> = {
+    project_id: input.project_id,
+    title,
+    description: input.description?.trim() || '',
+    version: input.version || 1,
+    notes: input.notes?.trim() || '',
+  };
+  if (userId) {
+    sequencePayload.user_id = userId;
+  }
+
+  const { data: newSeq, error: seqError } = await supabase
+    .from('sequences')
+    .insert([sequencePayload])
+    .select()
+    .single();
+
+  if (seqError) {
+    throw normalizeError(seqError);
+  }
+  if (!newSeq) {
+    throw new Error('Failed to create sequence.');
+  }
+
+  // If initial shot IDs provided, generate sequence entries
+  const initialShotIds = input.initial_shot_ids || input.initialShotIds || [];
+  if (initialShotIds.length > 0) {
+    // Optionally fetch preferred video assets for these shots
+    const { data: preferredAssets } = await supabase
+      .from('assets')
+      .select('id, shot_id')
+      .eq('project_id', input.project_id)
+      .eq('asset_type', 'video')
+      .eq('is_preferred', true);
+
+    const preferredMap = new Map<string, string>();
+    if (preferredAssets) {
+      preferredAssets.forEach((a: { id: string; shot_id: string | null }) => {
+        if (a.shot_id) preferredMap.set(a.shot_id, a.id);
+      });
+    }
+
+    const entriesToInsert = initialShotIds.map((shotId: string, idx: number) => ({
+      sequence_id: newSeq.id,
+      project_id: input.project_id,
+      shot_id: shotId,
+      sequence_order: idx + 1,
+      video_asset_id: preferredMap.get(shotId) || null,
+      image_asset_id: null,
+      in_point_seconds: null,
+      out_point_seconds: null,
+      notes: '',
+    }));
+
+    const { error: entriesErr } = await supabase
+      .from('sequence_entries')
+      .insert(entriesToInsert);
+
+    if (entriesErr) {
+      console.warn('Failed to insert initial sequence entries:', entriesErr);
+    }
+  }
+
+  return newSeq;
+}
+
+/**
+ * Updates a sequence's title, description, version, or notes.
+ */
+export async function updateSequence(
+  sequenceId: string,
+  input: UpdateSequenceInput
+): Promise<Sequence> {
+  if (!sequenceId) throw new Error('Sequence ID is required.');
+
+  const updates: Record<string, unknown> = {};
+  if (input.title !== undefined) {
+    const trimmed = input.title.trim();
+    if (!trimmed) throw new Error('Sequence title cannot be empty.');
+    updates.title = trimmed;
+  }
+  if (input.description !== undefined) updates.description = input.description.trim();
+  if (input.version !== undefined) updates.version = Math.max(1, input.version);
+  if (input.notes !== undefined) updates.notes = input.notes.trim();
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('sequences')
+    .update(updates)
+    .eq('id', sequenceId)
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to update sequence.');
+  }
+  return data;
+}
+
+/**
+ * Deletes a sequence and its entries.
+ * CRITICAL: Under NO circumstances does this delete or modify underlying shots, scenes, or assets.
+ */
+export async function deleteSequence(sequenceId: string): Promise<void> {
+  if (!sequenceId) throw new Error('Sequence ID is required.');
+  const supabase = getSupabaseClient();
+
+  // Delete sequence entries first
+  const { error: entriesErr } = await supabase
+    .from('sequence_entries')
+    .delete()
+    .eq('sequence_id', sequenceId);
+
+  if (entriesErr) {
+    throw normalizeError(entriesErr);
+  }
+
+  // Delete sequence
+  const { error: seqErr } = await supabase
+    .from('sequences')
+    .delete()
+    .eq('id', sequenceId);
+
+  if (seqErr) {
+    throw normalizeError(seqErr);
+  }
+}
+
+/**
+ * Duplicates a sequence to create an alternate cut or version.
+ * CRITICAL: Deep clones the sequence and entries with new IDs, without duplicating or modifying
+ * underlying shots, scenes, or assets.
+ */
+export async function duplicateSequence(
+  sequenceId: string,
+  newTitle?: string
+): Promise<Sequence> {
+  if (!sequenceId) throw new Error('Source sequence ID is required.');
+  const sourceSeq = await fetchSequenceById(sequenceId);
+  const sourceEntries = await fetchSequenceEntries(sequenceId);
+
+  const title = (newTitle?.trim()) || `${sourceSeq.title} (Alternate Cut)`;
+  const newSequence = await createSequence({
+    project_id: sourceSeq.project_id,
+    title,
+    description: sourceSeq.description || '',
+    version: (sourceSeq.version || 1) + 1,
+    notes: sourceSeq.notes ? `Cloned from "${sourceSeq.title}". ${sourceSeq.notes}` : `Cloned from "${sourceSeq.title}".`,
+  });
+
+  if (sourceEntries.length > 0) {
+    const supabase = getSupabaseClient();
+    const clonedEntries = sourceEntries.map((entry) => ({
+      sequence_id: newSequence.id,
+      project_id: sourceSeq.project_id,
+      shot_id: entry.shot_id,
+      sequence_order: entry.sequence_order,
+      video_asset_id: entry.video_asset_id,
+      image_asset_id: entry.image_asset_id,
+      in_point_seconds: entry.in_point_seconds,
+      out_point_seconds: entry.out_point_seconds,
+      transition_type: entry.transition_type || 'cut',
+      transition_duration_seconds: entry.transition_duration_seconds || 0,
+      notes: entry.notes || '',
+    }));
+
+    const { error: insertErr } = await supabase
+      .from('sequence_entries')
+      .insert(clonedEntries);
+
+    if (insertErr) {
+      throw normalizeError(insertErr);
+    }
+  }
+
+  return newSequence;
+}
+
+// ============================================================================
+// SEQUENCE ENTRIES
+// ============================================================================
+
+/**
+ * Fetches all sequence entries for a sequence, ordered by sequence_order.
+ */
+export async function fetchSequenceEntries(sequenceId: string): Promise<SequenceEntry[]> {
+  if (!sequenceId) throw new Error('Sequence ID is required.');
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('sequence_entries')
+    .select('*')
+    .eq('sequence_id', sequenceId)
+    .order('sequence_order', { ascending: true });
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  return data || [];
+}
+
+/**
+ * Adds a shot as a sequence entry.
+ */
+export async function createSequenceEntry(
+  input: CreateSequenceEntryInput
+): Promise<SequenceEntry> {
+  if (!input.sequence_id) throw new Error('Sequence ID is required.');
+  if (!input.project_id) throw new Error('Project ID is required.');
+  if (!input.shot_id) throw new Error('Shot ID is required.');
+
+  const supabase = getSupabaseClient();
+
+  // If order is not specified, place it at the end of the sequence
+  let order = input.sequence_order;
+  if (order === undefined || order === null) {
+    const { count } = await supabase
+      .from('sequence_entries')
+      .select('*', { count: 'exact', head: true })
+      .eq('sequence_id', input.sequence_id);
+    order = (count || 0) + 1;
+  }
+
+  const { data, error } = await supabase
+    .from('sequence_entries')
+    .insert([
+      {
+        sequence_id: input.sequence_id,
+        project_id: input.project_id,
+        shot_id: input.shot_id,
+        sequence_order: order,
+        video_asset_id: input.video_asset_id || null,
+        image_asset_id: input.image_asset_id || null,
+        in_point_seconds: input.in_point_seconds !== undefined ? input.in_point_seconds : null,
+        out_point_seconds: input.out_point_seconds !== undefined ? input.out_point_seconds : null,
+        transition_type: input.transition_type?.trim() || 'cut',
+        transition_duration_seconds: input.transition_duration_seconds || 0,
+        notes: input.notes?.trim() || '',
+      },
+    ])
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to create sequence entry.');
+  }
+  return data;
+}
+
+/**
+ * Updates a sequence entry (asset selection, trimming, transition, notes, order).
+ */
+export async function updateSequenceEntry(
+  entryId: string,
+  input: UpdateSequenceEntryInput
+): Promise<SequenceEntry> {
+  if (!entryId) throw new Error('Entry ID is required.');
+
+  const updates: Record<string, unknown> = {};
+  if (input.sequence_order !== undefined) updates.sequence_order = input.sequence_order;
+  if (input.video_asset_id !== undefined) updates.video_asset_id = input.video_asset_id;
+  if (input.image_asset_id !== undefined) updates.image_asset_id = input.image_asset_id;
+  if (input.in_point_seconds !== undefined) updates.in_point_seconds = input.in_point_seconds;
+  if (input.out_point_seconds !== undefined) updates.out_point_seconds = input.out_point_seconds;
+  if (input.transition_type !== undefined) updates.transition_type = input.transition_type;
+  if (input.transition_duration_seconds !== undefined) {
+    updates.transition_duration_seconds = input.transition_duration_seconds;
+  }
+  if (input.notes !== undefined) updates.notes = input.notes;
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('sequence_entries')
+    .update(updates)
+    .eq('id', entryId)
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to update sequence entry.');
+  }
+  return data;
+}
+
+/**
+ * Deletes a sequence entry without deleting the referenced shot.
+ */
+export async function deleteSequenceEntry(entryId: string): Promise<void> {
+  if (!entryId) throw new Error('Entry ID is required.');
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from('sequence_entries')
+    .delete()
+    .eq('id', entryId);
+
+  if (error) {
+    throw normalizeError(error);
+  }
+}
+
+/**
+ * Reorders sequence entries within a sequence.
+ */
+export async function reorderSequenceEntries(
+  sequenceId: string,
+  orderedEntryIds: string[]
+): Promise<void> {
+  if (!sequenceId) throw new Error('Sequence ID is required.');
+  if (!orderedEntryIds || orderedEntryIds.length === 0) return;
+
+  const supabase = getSupabaseClient();
+  for (let idx = 0; idx < orderedEntryIds.length; idx++) {
+    const entryId = orderedEntryIds[idx];
+    const { error } = await supabase
+      .from('sequence_entries')
+      .update({ sequence_order: idx + 1 })
+      .eq('id', entryId)
+      .eq('sequence_id', sequenceId);
+
+    if (error) {
+      throw normalizeError(error);
+    }
+  }
+}
+
+// ============================================================================
+// AUDIO TRACKS & NARRATION PLANNING
+// ============================================================================
+
+/**
+ * Fetches audio tracks for a project, optionally filtered by sequence_id.
+ */
+export async function fetchAudioTracks(
+  projectId: string,
+  sequenceId?: string | null
+): Promise<AudioTrack[]> {
+  if (!projectId) throw new Error('Project ID is required.');
+  const supabase = getSupabaseClient();
+
+  let query = supabase
+    .from('audio_tracks')
+    .select('*')
+    .eq('project_id', projectId);
+
+  if (sequenceId) {
+    query = query.eq('sequence_id', sequenceId);
+  }
+
+  const { data, error } = await query.order('start_time_seconds', { ascending: true });
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  return data || [];
+}
+
+/**
+ * Creates an audio track record (dialogue, narration/VO, sound effect, music cue).
+ */
+export async function createAudioTrack(
+  input: CreateAudioTrackInput
+): Promise<AudioTrack> {
+  if (!input.project_id) throw new Error('Project ID is required.');
+  const title = input.title?.trim();
+  if (!title) throw new Error('Audio track title is required.');
+
+  const supabase = getSupabaseClient();
+  let userId: string | null = null;
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    if (authData?.user) userId = authData.user.id;
+  } catch {
+    // optional
+  }
+
+  const payload: Record<string, unknown> = {
+    project_id: input.project_id,
+    sequence_id: input.sequence_id || null,
+    sequence_entry_id: input.sequence_entry_id || null,
+    audio_type: input.audio_type || 'narration',
+    title,
+    character_id: input.character_id || null,
+    text: input.text?.trim() || '',
+    audio_asset_id: input.audio_asset_id || null,
+    status: input.status || 'not_recorded',
+    start_time_seconds: input.start_time_seconds || 0,
+    duration_seconds: input.duration_seconds || null,
+    in_point_seconds: input.in_point_seconds || null,
+    out_point_seconds: input.out_point_seconds || null,
+    notes: input.notes?.trim() || '',
+  };
+  if (userId) payload.user_id = userId;
+
+  const { data, error } = await supabase
+    .from('audio_tracks')
+    .insert([payload])
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to create audio track.');
+  }
+  return data;
+}
+
+/**
+ * Updates an audio track (status, asset reference, start time, notes).
+ */
+export async function updateAudioTrack(
+  trackId: string,
+  input: UpdateAudioTrackInput
+): Promise<AudioTrack> {
+  if (!trackId) throw new Error('Track ID is required.');
+
+  const updates: Record<string, unknown> = {};
+  if (input.title !== undefined) {
+    const trimmed = input.title.trim();
+    if (!trimmed) throw new Error('Audio track title cannot be empty.');
+    updates.title = trimmed;
+  }
+  if (input.character_id !== undefined) updates.character_id = input.character_id;
+  if (input.text !== undefined) updates.text = input.text.trim();
+  if (input.audio_asset_id !== undefined) updates.audio_asset_id = input.audio_asset_id;
+  if (input.status !== undefined) updates.status = input.status;
+  if (input.start_time_seconds !== undefined) updates.start_time_seconds = input.start_time_seconds;
+  if (input.duration_seconds !== undefined) updates.duration_seconds = input.duration_seconds;
+  if (input.in_point_seconds !== undefined) updates.in_point_seconds = input.in_point_seconds;
+  if (input.out_point_seconds !== undefined) updates.out_point_seconds = input.out_point_seconds;
+  if (input.notes !== undefined) updates.notes = input.notes.trim();
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('audio_tracks')
+    .update(updates)
+    .eq('id', trackId)
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to update audio track.');
+  }
+  return data;
+}
+
+/**
+ * Deletes an audio track without affecting media assets.
+ */
+export async function deleteAudioTrack(trackId: string): Promise<void> {
+  if (!trackId) throw new Error('Track ID is required.');
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from('audio_tracks')
+    .delete()
+    .eq('id', trackId);
+
+  if (error) {
+    throw normalizeError(error);
+  }
+}

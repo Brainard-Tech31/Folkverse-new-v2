@@ -33,6 +33,9 @@ import { LocationBible } from './LocationBible.tsx';
 import { ShotPlanner } from './ShotPlanner.tsx';
 import { ProductionSummary } from './ProductionSummary.tsx';
 import { ProductionDashboardView } from './ProductionDashboardView.tsx';
+import { ProductionAssemblyView } from './ProductionAssemblyView.tsx';
+import { QualityControlSection } from './QualityControlSection.tsx';
+import { calculateProductionRuntime, analyzeProjectQuality } from '../services/qualityControl.ts';
 import { ShotDetailModal } from './ShotDetailModal.tsx';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import { ImportBlueprintModal } from './ImportBlueprintModal.tsx';
@@ -57,6 +60,8 @@ import {
   Download,
   Film,
   Sparkles,
+  ShieldAlert,
+  Scissors,
 } from 'lucide-react';
 
 interface ProjectWorkspaceViewProps {
@@ -168,7 +173,7 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
   onImportBlueprint,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'production' | 'scenes' | 'shots' | 'characters' | 'locations' | 'screenplay' | 'summary' | 'details'
+    'production' | 'assembly' | 'quality' | 'scenes' | 'shots' | 'characters' | 'locations' | 'screenplay' | 'summary' | 'details'
   >('production');
   const [selectedShotSceneId, setSelectedShotSceneId] = useState<string>('');
 
@@ -228,10 +233,12 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
     setActiveTab('shots');
   };
 
-  // Runtime calculation
-  const totalSeconds = shots.reduce((acc, sh) => acc + (Number(sh.duration_seconds) || 0), 0);
-  const runtimeMins = Math.floor(totalSeconds / 60);
-  const runtimeSecs = Math.round(totalSeconds % 60);
+  // Phase 3 Deterministic Runtime & Quality Metrics
+  const runtimeReport = calculateProductionRuntime(shots);
+  const totalSeconds = runtimeReport.totalSeconds;
+  const runtimeMins = runtimeReport.minutes + runtimeReport.hours * 60;
+  const runtimeSecs = runtimeReport.seconds;
+  const qcReport = analyzeProjectQuality(project, scenes, shots, characters, locations, assets);
 
   // Find updated inspecting shot if state changes
   const activeInspectingShot = inspectingShot
@@ -449,6 +456,52 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('assembly')}
+            className={`px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
+              activeTab === 'assembly'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md shadow-amber-950/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+            }`}
+          >
+            <Scissors className="w-4 h-4" />
+            <span>Production Assembly</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeTab === 'assembly'
+                  ? 'bg-zinc-950/20 text-zinc-950 font-bold'
+                  : 'bg-zinc-800 text-zinc-400'
+              }`}
+            >
+              Phase 5
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('quality')}
+            className={`px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
+              activeTab === 'quality'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md shadow-amber-950/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+            }`}
+          >
+            <ShieldAlert className="w-4 h-4" />
+            <span>Quality Control</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                activeTab === 'quality'
+                  ? 'bg-zinc-950/20 text-zinc-950'
+                  : qcReport.summary.errorsCount > 0
+                  ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                  : qcReport.summary.warningsCount > 0
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              }`}
+            >
+              {qcReport.summary.totalFindings > 0 ? qcReport.summary.totalFindings : 'Pass'}
+            </span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('scenes')}
             className={`px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
               activeTab === 'scenes'
@@ -575,6 +628,32 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             onOpenShotDetail={(sh) => setInspectingShot(sh)}
             onJumpToScenes={() => setActiveTab('scenes')}
             onJumpToShotPlanner={handleJumpToShotPlanner}
+            onNavigateToTab={(tab) => setActiveTab(tab)}
+          />
+        )}
+
+        {activeTab === 'assembly' && (
+          <ProductionAssemblyView
+            project={project}
+            scenes={scenes}
+            shots={shots}
+            characters={characters}
+            assets={assets}
+            onOpenShotDetail={(sh) => setInspectingShot(sh)}
+          />
+        )}
+
+        {activeTab === 'quality' && (
+          <QualityControlSection
+            project={project}
+            scenes={scenes}
+            shots={shots}
+            characters={characters}
+            locations={locations}
+            assets={assets}
+            onOpenShotDetail={(sh) => setInspectingShot(sh)}
+            onNavigateToTab={(tab) => setActiveTab(tab)}
+            onSelectSceneForShots={handleJumpToShotPlanner}
           />
         )}
 

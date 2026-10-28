@@ -24,7 +24,9 @@ import {
   Image,
   Video,
   Layers,
+  ShieldAlert,
 } from 'lucide-react';
+import { calculateProductionRuntime, analyzeProjectQuality } from '../services/qualityControl.ts';
 
 interface ProductionSummaryProps {
   project: Project;
@@ -43,15 +45,15 @@ export const ProductionSummary: React.FC<ProductionSummaryProps> = ({
   locations,
   onSelectScene,
 }) => {
-  // 1. Calculate Runtimes
-  const totalSeconds = shots.reduce(
-    (acc, sh) => acc + (Number(sh.duration_seconds) || 0),
-    0
-  );
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = Math.round(totalSeconds % 60);
+  // 1. Calculate Runtimes with Phase 3 Engine
+  const runtime = calculateProductionRuntime(shots);
+  const totalSeconds = runtime.totalSeconds;
+  const totalMinutes = runtime.minutes + runtime.hours * 60;
+  const remainingSeconds = runtime.seconds;
 
-  // 2. Production Health & Quality Checks
+  // 2. Production Health & Quality Checks with Phase 3 Engine
+  const qcReport = analyzeProjectQuality(project, scenes, shots, characters, locations);
+
   // A. Shots missing image prompts
   const shotsMissingImagePrompt = shots.filter(
     (sh) => !sh.image_prompt || !sh.image_prompt.trim()
@@ -88,13 +90,12 @@ export const ProductionSummary: React.FC<ProductionSummaryProps> = ({
 
   // Scene durations breakdown
   const sceneDurations = scenes.map((sc) => {
-    const scShots = shots.filter((sh) => sh.scene_id === sc.id);
-    const dur = scShots.reduce((acc, sh) => acc + (Number(sh.duration_seconds) || 0), 0);
+    const scSummary = runtime.sceneRuntimes[sc.id] || { durationSeconds: 0, formatted: '0m 00s', shotCount: 0 };
     return {
       scene: sc,
-      shotCount: scShots.length,
-      durationSeconds: dur,
-      durationFormatted: `${Math.floor(dur / 60)}m ${Math.round(dur % 60)}s`,
+      shotCount: scSummary.shotCount,
+      durationSeconds: scSummary.durationSeconds,
+      durationFormatted: scSummary.formatted,
     };
   });
 

@@ -285,6 +285,7 @@ export const SceneManager: React.FC<SceneManagerProps> = ({
 
             // Match location
             const matchedLocation = locations.find((l) => l.id === scene.location_id);
+            const isBrokenLocation = Boolean(scene.location_id && !matchedLocation);
             const displayLocation = matchedLocation ? matchedLocation.name : scene.location;
 
             return (
@@ -321,12 +322,17 @@ export const SceneManager: React.FC<SceneManagerProps> = ({
                         </span>
                       )}
 
-                      {displayLocation && (
+                      {isBrokenLocation ? (
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-red-500/15 border border-red-500/30 text-red-300 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3 text-red-400" />
+                          <span>Broken Location Ref: {scene.location_id}</span>
+                        </span>
+                      ) : displayLocation ? (
                         <span className="text-xs text-zinc-400 flex items-center gap-1">
                           <MapPin className="w-3 h-3 text-zinc-500" />
                           <span>{displayLocation}</span>
                         </span>
-                      )}
+                      ) : null}
 
                       <span className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400 flex items-center gap-1">
                         <Clock className="w-3 h-3 text-amber-400" />

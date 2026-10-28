@@ -1,9 +1,4 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import type {
   Shot,
   Scene,
@@ -16,6 +11,12 @@ import type {
 } from '../types/database.ts';
 import { SHOT_PRODUCTION_STATUSES } from '../types/database.ts';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
+import {
+  analyzeProjectQuality,
+  markFindingReviewed,
+  unmarkFindingReviewed,
+  getReviewedDecisions,
+} from '../services/qualityControl.ts';
 import {
   X,
   Camera,
@@ -35,6 +36,8 @@ import {
   Volume2,
   Music,
   AlertCircle,
+  AlertTriangle,
+  ShieldAlert,
   FileText,
   ExternalLink,
   ChevronRight,
@@ -134,6 +137,39 @@ export const ShotDetailModal: React.FC<ShotDetailModalProps> = ({
   // Participating characters
   const shotCharacters = characters.filter((c) => (shot.characters || []).includes(c.id));
   const sceneLocation = locations.find((l) => l.id === scene?.location_id);
+
+  // Shot Quality & Continuity findings
+  const [qcCounter, setQcCounter] = useState(0);
+  const shotFindings = useMemo(() => {
+    if (!scene) return [];
+    const dummyProject = {
+      id: shot.project_id || 'proj',
+      user_id: '',
+      title: '',
+      description: '',
+      created_at: '',
+      updated_at: '',
+    };
+    const report = analyzeProjectQuality(
+      dummyProject,
+      [scene],
+      [shot],
+      characters,
+      locations,
+      assets,
+      { reviewedDecisions: getReviewedDecisions(shot.project_id) }
+    );
+    return report.findings.filter((f) => f.shotId === shot.id);
+  }, [shot, scene, characters, locations, assets, qcCounter]);
+
+  const handleToggleFindingReview = (findingId: string, fingerprint: string, isReviewed: boolean) => {
+    if (isReviewed) {
+      unmarkFindingReviewed(shot.project_id, findingId);
+    } else {
+      markFindingReviewed(shot.project_id, findingId, fingerprint);
+    }
+    setQcCounter((c) => c + 1);
+  };
 
   const handleCopyPrompt = (text: string, type: 'image' | 'motion') => {
     if (!text) return;
@@ -452,23 +488,33 @@ export const ShotDetailModal: React.FC<ShotDetailModalProps> = ({
                   {shotCharacters.length > 0 ? (
                     <div className="space-y-2">
                       {shotCharacters.map((char) => (
-                        <div key={char.id} className="bg-zinc-950/50 border border-zinc-800/60 rounded-lg p-2.5 flex items-start gap-2.5">
-                          {char.reference_image_url ? (
-                            <img
-                              src={char.reference_image_url}
-                              alt={char.name}
-                              className="w-10 h-10 rounded-md object-cover border border-zinc-700 shrink-0"
-                            />
-                          ) : (
-                            <div className="w-10 h-10 rounded-md bg-zinc-800 flex items-center justify-center text-zinc-400 font-bold text-xs shrink-0">
-                              {char.name.charAt(0)}
+                        <div key={char.id} className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-3 space-y-2">
+                          <div className="flex items-start gap-2.5">
+                            {char.reference_image_url ? (
+                              <img
+                                src={char.reference_image_url}
+                                alt={char.name}
+                                className="w-11 h-11 rounded-md object-cover border border-zinc-700 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-11 h-11 rounded-md bg-zinc-800 flex items-center justify-center text-zinc-300 font-bold text-sm shrink-0 border border-zinc-700">
+                                {char.name.charAt(0)}
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1 text-xs">
+                              <div className="font-semibold text-zinc-100">{char.name} {char.role ? <span className="text-zinc-400 font-normal">({char.role})</span> : ''}</div>
+                              {char.appearance && <p className="text-zinc-400 text-[11px] mt-0.5"><span className="text-zinc-500">Appearance:</span> {char.appearance}</p>}
+                              {char.wardrobe && <p className="text-zinc-400 text-[11px] mt-0.5"><span className="text-zinc-500">Wardrobe:</span> {char.wardrobe}</p>}
+                            </div>
+                          </div>
+
+                          {/* Continuity Directives Callout */}
+                          {char.continuity_notes && (
+                            <div className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-md p-2">
+                              <span className="font-semibold text-amber-400">Continuity Directive: </span>
+                              {char.continuity_notes}
                             </div>
                           )}
-                          <div className="min-w-0 flex-1 text-xs">
-                            <div className="font-medium text-zinc-200">{char.name} {char.role ? `(${char.role})` : ''}</div>
-                            {char.wardrobe && <p className="text-zinc-400 truncate">Wardrobe: {char.wardrobe}</p>}
-                            {char.continuity_notes && <p className="text-amber-400/80 truncate">Note: {char.continuity_notes}</p>}
-                          </div>
                         </div>
                       ))}
                     </div>
@@ -478,11 +524,92 @@ export const ShotDetailModal: React.FC<ShotDetailModalProps> = ({
                 </div>
               </div>
 
-              {/* Continuity Notes */}
-              {shot.continuity_notes && (
-                <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 text-xs space-y-1">
-                  <div className="font-semibold text-amber-400 uppercase tracking-wider">Shot Continuity Directives</div>
-                  <p className="text-zinc-300">{shot.continuity_notes}</p>
+              {/* Continuity Directives: Scene & Shot */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Scene Continuity Directives */}
+                <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-4 text-xs space-y-1.5">
+                  <div className="font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Scene Continuity Directives
+                  </div>
+                  <p className="text-zinc-300 leading-relaxed">
+                    {scene?.continuity_notes || (
+                      <span className="text-zinc-500 italic">No scene-level continuity directives specified.</span>
+                    )}
+                  </p>
+                </div>
+
+                {/* Shot Continuity Directives */}
+                <div className="bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-4 text-xs space-y-1.5">
+                  <div className="font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5" />
+                    Shot Continuity Directives
+                  </div>
+                  <p className="text-zinc-300 leading-relaxed">
+                    {shot.continuity_notes || (
+                      <span className="text-zinc-500 italic">No shot-specific continuity directives recorded.</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {/* Shot Quality & Continuity Findings Card */}
+              {shotFindings.length > 0 && (
+                <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-4 h-4 text-amber-400" />
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-200">
+                        Quality & Continuity Checks ({shotFindings.length})
+                      </h4>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {shotFindings.map((finding) => {
+                      const isErr = finding.severity === 'error';
+                      return (
+                        <div
+                          key={finding.id}
+                          className={`p-3 rounded-lg border text-xs space-y-1.5 ${
+                            finding.isReviewed
+                              ? 'bg-zinc-950/40 border-zinc-800/60 opacity-80'
+                              : isErr
+                              ? 'bg-red-500/10 border-red-500/30'
+                              : 'bg-amber-500/10 border-amber-500/30'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold uppercase ${
+                                  isErr ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
+                                }`}>
+                                  {finding.severity}
+                                </span>
+                                <span className="font-semibold text-zinc-200">{finding.message}</span>
+                              </div>
+                              <p className="text-zinc-400 text-[11px] leading-relaxed">{finding.explanation}</p>
+                              <p className="text-amber-300/90 text-[11px]"><span className="font-semibold">Resolution:</span> {finding.suggestedResolution}</p>
+                            </div>
+
+                            {finding.canBeReviewed && (
+                              <button
+                                onClick={() => handleToggleFindingReview(finding.id, finding.fingerprint, finding.isReviewed)}
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold shrink-0 cursor-pointer transition-colors ${
+                                  finding.isReviewed
+                                    ? 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                    : 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40'
+                                }`}
+                              >
+                                {finding.isReviewed ? 'Unmark Review' : 'Mark Reviewed'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
