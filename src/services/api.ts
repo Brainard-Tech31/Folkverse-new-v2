@@ -11,6 +11,11 @@ import type {
   Character,
   Location,
   Shot,
+  ShotProductionStatus,
+  ProductionAsset,
+  CreateAssetInput,
+  UpdateAssetInput,
+  AssetType,
   CreateProjectInput,
   UpdateProjectInput,
   CreateSceneInput,
@@ -647,6 +652,7 @@ export async function createShot(input: CreateShotInput): Promise<Shot> {
         sound_effects: input.sound_effects || [],
         music_cue: input.music_cue || '',
         continuity_notes: input.continuity_notes || '',
+        production_status: input.production_status || 'Not Started',
       },
     ])
     .select()
@@ -684,6 +690,7 @@ export async function updateShot(shotId: string, input: UpdateShotInput): Promis
   if (input.sound_effects !== undefined) updates.sound_effects = input.sound_effects;
   if (input.music_cue !== undefined) updates.music_cue = input.music_cue;
   if (input.continuity_notes !== undefined) updates.continuity_notes = input.continuity_notes;
+  if (input.production_status !== undefined) updates.production_status = input.production_status;
 
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
@@ -700,6 +707,13 @@ export async function updateShot(shotId: string, input: UpdateShotInput): Promis
     throw new Error('Shot update failed.');
   }
   return data;
+}
+
+export async function updateShotProductionStatus(
+  shotId: string,
+  status: ShotProductionStatus
+): Promise<Shot> {
+  return updateShot(shotId, { production_status: status });
 }
 
 export async function reorderShots(
@@ -948,3 +962,358 @@ export async function importBlueprintToProject(
     shots: finalShots,
   };
 }
+
+// ============================================================================
+// ASSET MANAGEMENT (Phase 4: Production Execution & Asset Management)
+// ============================================================================
+
+const MAX_SIZES_BY_TYPE: Record<string, number> = {
+  image: 25 * 1024 * 1024, // 25MB
+  video: 100 * 1024 * 1024, // 100MB
+  audio: 50 * 1024 * 1024, // 50MB
+  character_reference: 25 * 1024 * 1024,
+  location_reference: 25 * 1024 * 1024,
+  reference_file: 30 * 1024 * 1024,
+};
+
+const ALLOWED_MIME_PREFIXES = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];
+
+export function validateAssetFile(
+  file: File,
+  assetType?: AssetType
+): { valid: boolean; error?: string } {
+  if (!file) {
+    return { valid: false, error: 'No file provided.' };
+  }
+
+  const mime = (file.type || '').toLowerCase();
+  const isAllowedMime =
+    ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix)) ||
+    mime === 'application/json';
+
+  const matchesExtension = file.name.match(
+    /\.(jpg|jpeg|png|webp|gif|avif|mp4|webm|mov|mkv|mp3|wav|ogg|aac|flac|m4a|pdf|txt|json)$/i
+  );
+
+  if (!isAllowedMime && !matchesExtension) {
+    return {
+      valid: false,
+      error: `Unsupported file format: ${file.type || 'unknown'}. Please upload image, video, audio, or production reference files.`,
+    };
+  }
+
+  const typeKey =
+    assetType ||
+    (mime.startsWith('video') ? 'video' : mime.startsWith('audio') ? 'audio' : 'image');
+  const maxBytes = MAX_SIZES_BY_TYPE[typeKey] || 30 * 1024 * 1024;
+
+  if (file.size > maxBytes) {
+    const maxMb = Math.round(maxBytes / (1024 * 1024));
+    return {
+      valid: false,
+      error: `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds maximum allowed limit of ${maxMb} MB for ${typeKey} assets.`,
+    };
+  }
+
+  return { valid: true };
+}
+
+export async function fetchProjectAssets(projectId: string): Promise<ProductionAsset[]> {
+  if (!projectId) throw new Error('Project ID is required.');
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from('assets')
+    .select('*')
+    .eq('project_id', projectId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  return data || [];
+}
+
+export async function fetchShotAssets(shotId: string): Promise<ProductionAsset[]> {
+  if (!shotId) throw new Error('Shot ID is required.');
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from('assets')
+    .select('*')
+    .eq('shot_id', shotId)
+    .order('version_number', { ascending: false });
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  return data || [];
+}
+
+export async function createAsset(input: CreateAssetInput): Promise<ProductionAsset> {
+  if (!input.project_id) throw new Error('Project ID is required to create an asset.');
+  const displayName = input.display_name?.trim();
+  if (!displayName) {
+    throw new Error('Asset display name is required and cannot be empty.');
+  }
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('assets')
+    .insert([
+      {
+        project_id: input.project_id,
+        scene_id: input.scene_id || null,
+        shot_id: input.shot_id || null,
+        asset_type: input.asset_type,
+        display_name: displayName,
+        storage_path: input.storage_path || '',
+        mime_type: input.mime_type || 'application/octet-stream',
+        file_size: input.file_size || 0,
+        duration_seconds: input.duration_seconds || null,
+        version_number: input.version_number !== undefined ? input.version_number : 1,
+        generation_tool: input.generation_tool?.trim() || '',
+        prompt_used: input.prompt_used?.trim() || '',
+        is_preferred: Boolean(input.is_preferred),
+        review_status: input.review_status || 'pending',
+        notes: input.notes?.trim() || '',
+        is_external: Boolean(input.is_external),
+        external_url: input.external_url?.trim() || '',
+      },
+    ])
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to register asset.');
+  }
+  return data;
+}
+
+export async function updateAsset(
+  assetId: string,
+  input: UpdateAssetInput
+): Promise<ProductionAsset> {
+  if (!assetId) throw new Error('Asset ID is required.');
+
+  const updates: Record<string, unknown> = {};
+  if (input.display_name !== undefined) {
+    const trimmed = input.display_name.trim();
+    if (!trimmed) throw new Error('Asset display name cannot be empty.');
+    updates.display_name = trimmed;
+  }
+  if (input.review_status !== undefined) updates.review_status = input.review_status;
+  if (input.is_preferred !== undefined) updates.is_preferred = input.is_preferred;
+  if (input.notes !== undefined) updates.notes = input.notes;
+  if (input.generation_tool !== undefined) updates.generation_tool = input.generation_tool;
+  if (input.prompt_used !== undefined) updates.prompt_used = input.prompt_used;
+  if (input.duration_seconds !== undefined) updates.duration_seconds = input.duration_seconds;
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('assets')
+    .update(updates)
+    .eq('id', assetId)
+    .select()
+    .single();
+
+  if (error) {
+    throw normalizeError(error);
+  }
+  if (!data) {
+    throw new Error('Failed to update asset.');
+  }
+  return data;
+}
+
+export async function setPreferredAsset(
+  shotId: string,
+  assetId: string,
+  assetType: AssetType
+): Promise<void> {
+  if (!shotId || !assetId) throw new Error('Shot ID and Asset ID are required.');
+  const supabase = getSupabaseClient();
+
+  // 1. Unset preferred for all assets on this shot of the same type
+  const { error: unsetError } = await supabase
+    .from('assets')
+    .update({ is_preferred: false })
+    .eq('shot_id', shotId)
+    .eq('asset_type', assetType);
+
+  if (unsetError) {
+    throw normalizeError(unsetError);
+  }
+
+  // 2. Set preferred on target asset
+  const { error: setError } = await supabase
+    .from('assets')
+    .update({ is_preferred: true })
+    .eq('id', assetId);
+
+  if (setError) {
+    throw normalizeError(setError);
+  }
+}
+
+export async function deleteAsset(assetId: string): Promise<void> {
+  if (!assetId) throw new Error('Asset ID is required.');
+  const supabase = getSupabaseClient();
+
+  // Check if storage file exists
+  const { data: asset } = await supabase
+    .from('assets')
+    .select('storage_path, is_external')
+    .eq('id', assetId)
+    .maybeSingle();
+
+  const { error } = await supabase.from('assets').delete().eq('id', assetId);
+  if (error) {
+    throw normalizeError(error);
+  }
+
+  // If local Supabase storage, attempt cleanup
+  if (asset && !asset.is_external && asset.storage_path) {
+    try {
+      const match = asset.storage_path.match(/production-assets\/(.+)$/);
+      if (match && match[1]) {
+        await supabase.storage.from('production-assets').remove([match[1]]);
+      }
+    } catch {
+      // Ignore background storage removal errors
+    }
+  }
+}
+
+export async function uploadAssetFile(
+  projectId: string,
+  shotId: string | null,
+  file: File,
+  meta?: {
+    scene_id?: string | null;
+    asset_type?: AssetType;
+    display_name?: string;
+    generation_tool?: string;
+    prompt_used?: string;
+    notes?: string;
+    version_number?: number;
+  }
+): Promise<ProductionAsset> {
+  if (!projectId) throw new Error('Project ID is required.');
+
+  let detectedType: AssetType = meta?.asset_type || 'image';
+  if (!meta?.asset_type) {
+    if (file.type.startsWith('video')) detectedType = 'video';
+    else if (file.type.startsWith('audio')) detectedType = 'audio';
+    else if (file.type.startsWith('image')) detectedType = 'image';
+    else detectedType = 'reference_file';
+  }
+
+  const validation = validateAssetFile(file, detectedType);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Invalid file.');
+  }
+
+  const supabase = getSupabaseClient();
+  const sanitizedName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `${projectId}/${shotId || 'general'}/${Date.now()}_${sanitizedName}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from('production-assets')
+    .upload(storagePath, file, {
+      cacheControl: '3600',
+      upsert: false,
+    });
+
+  if (uploadError) {
+    throw new Error(
+      `Storage upload failed: ${uploadError.message}. Make sure the 'production-assets' bucket exists in your Supabase project, or use an external URL link.`
+    );
+  }
+
+  const { data: urlData } = supabase.storage
+    .from('production-assets')
+    .getPublicUrl(storagePath);
+
+  const publicUrl = urlData?.publicUrl || storagePath;
+
+  let version = meta?.version_number;
+  if (!version && shotId) {
+    const { count } = await supabase
+      .from('assets')
+      .select('id', { count: 'exact', head: true })
+      .eq('shot_id', shotId)
+      .eq('asset_type', detectedType);
+    version = (count || 0) + 1;
+  }
+
+  return createAsset({
+    project_id: projectId,
+    scene_id: meta?.scene_id || null,
+    shot_id: shotId,
+    asset_type: detectedType,
+    display_name: meta?.display_name?.trim() || file.name,
+    storage_path: publicUrl,
+    mime_type: file.type || 'application/octet-stream',
+    file_size: file.size,
+    version_number: version || 1,
+    generation_tool: meta?.generation_tool?.trim() || '',
+    prompt_used: meta?.prompt_used?.trim() || '',
+    notes: meta?.notes?.trim() || '',
+    is_external: false,
+    review_status: 'pending',
+  });
+}
+
+export async function createExternalAsset(input: {
+  project_id: string;
+  scene_id?: string | null;
+  shot_id?: string | null;
+  asset_type: AssetType;
+  display_name: string;
+  external_url: string;
+  generation_tool?: string;
+  prompt_used?: string;
+  notes?: string;
+  version_number?: number;
+}): Promise<ProductionAsset> {
+  const url = input.external_url?.trim();
+  if (!url) throw new Error('External asset URL cannot be empty.');
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('URL must start with http:// or https://');
+    }
+  } catch {
+    throw new Error('Invalid URL format. Please provide a full URL starting with https://');
+  }
+
+  const displayName = input.display_name?.trim() || 'External Media';
+
+  return createAsset({
+    project_id: input.project_id,
+    scene_id: input.scene_id || null,
+    shot_id: input.shot_id || null,
+    asset_type: input.asset_type,
+    display_name: displayName,
+    storage_path: url,
+    external_url: url,
+    is_external: true,
+    mime_type:
+      input.asset_type === 'video'
+        ? 'video/external'
+        : input.asset_type === 'audio'
+        ? 'audio/external'
+        : 'image/external',
+    file_size: 0,
+    generation_tool: input.generation_tool?.trim() || '',
+    prompt_used: input.prompt_used?.trim() || '',
+    notes: input.notes?.trim() || '',
+    version_number: input.version_number || 1,
+    review_status: 'pending',
+  });
+}
+

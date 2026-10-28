@@ -11,7 +11,10 @@ import type {
   CreateShotInput,
   UpdateShotInput,
   DialogueItem,
+  ProductionAsset,
+  ShotProductionStatus,
 } from '../types/database.ts';
+import { SHOT_PRODUCTION_STATUSES } from '../types/database.ts';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import {
   Camera,
@@ -34,6 +37,9 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Film,
+  Star,
+  ExternalLink,
 } from 'lucide-react';
 
 interface ShotPlannerProps {
@@ -41,6 +47,7 @@ interface ShotPlannerProps {
   scenes: Scene[];
   shots: Shot[];
   characters: Character[];
+  assets?: ProductionAsset[];
   activeSceneId?: string;
   isLoading: boolean;
   onCreateShot: (input: CreateShotInput) => Promise<void>;
@@ -48,6 +55,8 @@ interface ShotPlannerProps {
   onReorderShots: (sceneId: string, orderedShotIds: string[]) => Promise<void>;
   onMoveShotToScene: (shotId: string, targetSceneId: string) => Promise<void>;
   onDeleteShot: (shotId: string) => Promise<void>;
+  onOpenShotDetail?: (shot: Shot) => void;
+  onUpdateShotStatus?: (shotId: string, status: ShotProductionStatus) => Promise<void>;
 }
 
 const COMMON_SHOT_TYPES = [
@@ -84,11 +93,31 @@ const COMMON_MOVEMENTS = [
   'Steadicam / Handheld',
 ];
 
+const getStatusBadgeColor = (status?: ShotProductionStatus) => {
+  switch (status) {
+    case 'Approved':
+      return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
+    case 'In Review':
+      return 'bg-blue-500/10 text-blue-400 border-blue-500/30';
+    case 'Video Generated':
+      return 'bg-purple-500/10 text-purple-400 border-purple-500/30';
+    case 'Image Generated':
+      return 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30';
+    case 'Prompt Ready':
+      return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
+    case 'Needs Revision':
+      return 'bg-rose-500/10 text-rose-400 border-rose-500/30';
+    default:
+      return 'bg-zinc-800 text-zinc-400 border-zinc-700';
+  }
+};
+
 export const ShotPlanner: React.FC<ShotPlannerProps> = ({
   projectId,
   scenes,
   shots,
   characters,
+  assets = [],
   activeSceneId: initialActiveSceneId,
   isLoading,
   onCreateShot,
@@ -96,16 +125,20 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
   onReorderShots,
   onMoveShotToScene,
   onDeleteShot,
+  onOpenShotDetail,
+  onUpdateShotStatus,
 }) => {
   const [selectedSceneId, setSelectedSceneId] = useState<string>(
     initialActiveSceneId || (scenes.length > 0 ? scenes[0].id : '')
   );
+  const [statusFilter, setStatusFilter] = useState<'all' | ShotProductionStatus | 'needs_attention'>('all');
   const [createModalOpen, setCreateModalOpen] = useState<boolean>(false);
   const [editingShot, setEditingShot] = useState<Shot | null>(null);
   const [movingShot, setMovingShot] = useState<Shot | null>(null);
   const [targetSceneId, setTargetSceneId] = useState<string>('');
   const [deletingShot, setDeletingShot] = useState<Shot | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
   const [expandedShotId, setExpandedShotId] = useState<string | null>(null);
 
   // Form states
@@ -129,6 +162,13 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
   const currentScene = scenes.find((s) => s.id === selectedSceneId) || scenes[0];
   const activeShots = shots
     .filter((sh) => sh.scene_id === (currentScene?.id || ''))
+    .filter((sh) => {
+      if (statusFilter === 'all') return true;
+      if (statusFilter === 'needs_attention') {
+        return sh.production_status === 'Needs Revision' || !sh.image_prompt?.trim() || !sh.motion_prompt?.trim();
+      }
+      return (sh.production_status || 'Not Started') === statusFilter;
+    })
     .sort((a, b) => a.shot_order - b.shot_order);
 
   const resetForm = () => {
@@ -391,6 +431,50 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
         </button>
       </div>
 
+      {/* Production Status Filter Bar */}
+      <div className="flex items-center gap-1.5 flex-wrap bg-[#141518] border border-zinc-800 rounded-xl p-2.5">
+        <span className="text-xs text-zinc-400 font-medium px-2">Filter:</span>
+        <button
+          onClick={() => setStatusFilter('all')}
+          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+            statusFilter === 'all'
+              ? 'bg-amber-500 text-black font-semibold'
+              : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          All ({shots.filter((s) => s.scene_id === (currentScene?.id || '')).length})
+        </button>
+        {SHOT_PRODUCTION_STATUSES.map((st) => {
+          const count = shots.filter(
+            (s) => s.scene_id === (currentScene?.id || '') && (s.production_status || 'Not Started') === st
+          ).length;
+          return (
+            <button
+              key={st}
+              onClick={() => setStatusFilter(st)}
+              className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+                statusFilter === st
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <span>{st}</span>
+              {count > 0 && <span className="text-[10px] opacity-80">({count})</span>}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setStatusFilter('needs_attention')}
+          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+            statusFilter === 'needs_attention'
+              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+              : 'bg-zinc-900 border border-zinc-800 text-rose-400/80 hover:text-rose-300'
+          }`}
+        >
+          <span>Needs Attention</span>
+        </button>
+      </div>
+
       {/* Active Shots List */}
       {activeShots.length === 0 ? (
         <div className="p-12 text-center rounded-2xl border border-dashed border-zinc-800 bg-zinc-950/40 space-y-3">
@@ -424,15 +508,37 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
               >
                 {/* Main Card Header */}
                 <div className="p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  {/* Shot details and status */}
                   <div className="flex items-start gap-3.5 flex-1 min-w-0">
-                    <div className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 text-center shrink-0">
-                      <span className="text-[10px] text-zinc-500 font-semibold uppercase">
-                        SHOT
-                      </span>
-                      <span className="text-base font-bold text-amber-400 leading-tight">
-                        {shot.shot_order}
-                      </span>
-                    </div>
+                    {/* Thumbnail or Shot Order Box */}
+                    {(() => {
+                      const shotAssets = assets.filter((a) => a.shot_id === shot.id);
+                      const preferred = shotAssets.find((a) => a.is_preferred) || shotAssets.find((a) => a.asset_type === 'image');
+                      return (
+                        <div
+                          onClick={() => onOpenShotDetail?.(shot)}
+                          className="flex flex-col items-center justify-center w-12 h-12 rounded-xl bg-zinc-900 border border-zinc-800 text-center shrink-0 overflow-hidden relative cursor-pointer hover:border-amber-500/60 transition-colors"
+                          title="Open Production Workspace"
+                        >
+                          {preferred?.storage_path ? (
+                            <img
+                              src={preferred.storage_path}
+                              alt={shot.title}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <>
+                              <span className="text-[10px] text-zinc-500 font-semibold uppercase">
+                                SHOT
+                              </span>
+                              <span className="text-base font-bold text-amber-400 leading-tight">
+                                {shot.shot_order}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     <div className="space-y-1.5 flex-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -449,17 +555,56 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
                           {shot.shot_type || 'Wide shot'}
                         </span>
 
-                        {shot.camera_angle && (
-                          <span className="text-[10px] text-zinc-400">
-                            • {shot.camera_angle}
-                          </span>
+                        {/* Production Status selector */}
+                        <select
+                          value={shot.production_status || 'Not Started'}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            const newSt = e.target.value as ShotProductionStatus;
+                            onUpdateShotStatus
+                              ? onUpdateShotStatus(shot.id, newSt)
+                              : onUpdateShot(shot.id, { production_status: newSt });
+                          }}
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border cursor-pointer focus:outline-none ${getStatusBadgeColor(
+                            shot.production_status
+                          )}`}
+                        >
+                          {SHOT_PRODUCTION_STATUSES.map((st) => (
+                            <option key={st} value={st} className="bg-zinc-900 text-zinc-200">
+                              {st}
+                            </option>
+                          ))}
+                        </select>
+
+                        {/* Quick Request Revision button if approved */}
+                        {shot.production_status === 'Approved' && (
+                          <button
+                            onClick={() => {
+                              onUpdateShotStatus
+                                ? onUpdateShotStatus(shot.id, 'Needs Revision')
+                                : onUpdateShot(shot.id, { production_status: 'Needs Revision' });
+                            }}
+                            className="text-[10px] text-rose-400 hover:text-rose-300 underline cursor-pointer"
+                            title="Flag this approved shot for revision"
+                          >
+                            Needs Revision
+                          </button>
                         )}
 
-                        {shot.camera_movement && (
-                          <span className="text-[10px] text-zinc-400">
-                            • {shot.camera_movement}
-                          </span>
-                        )}
+                        {/* Asset counter pill */}
+                        {(() => {
+                          const shotAssets = assets.filter((a) => a.shot_id === shot.id);
+                          return (
+                            <button
+                              onClick={() => onOpenShotDetail?.(shot)}
+                              className="text-[10px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 hover:border-amber-500/50 text-zinc-300 flex items-center gap-1 transition-colors cursor-pointer"
+                              title="Inspect attached assets"
+                            >
+                              <Film className="w-3 h-3 text-cyan-400" />
+                              <span>{shotAssets.length} assets</span>
+                            </button>
+                          );
+                        })()}
                       </div>
 
                       {shot.action && (
@@ -484,9 +629,22 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
                         </button>
 
                         {shot.image_prompt ? (
-                          <span className="text-emerald-400/90 flex items-center gap-1 text-[10px]">
-                            <Image className="w-3 h-3" /> Image Prompt
-                          </span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(shot.image_prompt);
+                              setCopiedPromptId(`img_${shot.id}`);
+                              setTimeout(() => setCopiedPromptId(null), 1800);
+                            }}
+                            className="text-emerald-400/90 hover:text-emerald-300 flex items-center gap-1 text-[10px] cursor-pointer"
+                            title="Copy Image Prompt"
+                          >
+                            {copiedPromptId === `img_${shot.id}` ? (
+                              <Check className="w-3 h-3 text-emerald-300" />
+                            ) : (
+                              <Image className="w-3 h-3" />
+                            )}
+                            <span>Copy Image Prompt</span>
+                          </button>
                         ) : (
                           <span className="text-amber-500/80 flex items-center gap-1 text-[10px]">
                             <AlertCircle className="w-3 h-3" /> Missing Image Prompt
@@ -494,9 +652,22 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
                         )}
 
                         {shot.motion_prompt ? (
-                          <span className="text-emerald-400/90 flex items-center gap-1 text-[10px]">
-                            <Video className="w-3 h-3" /> Motion Prompt
-                          </span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(shot.motion_prompt);
+                              setCopiedPromptId(`mot_${shot.id}`);
+                              setTimeout(() => setCopiedPromptId(null), 1800);
+                            }}
+                            className="text-emerald-400/90 hover:text-emerald-300 flex items-center gap-1 text-[10px] cursor-pointer"
+                            title="Copy Motion Prompt"
+                          >
+                            {copiedPromptId === `mot_${shot.id}` ? (
+                              <Check className="w-3 h-3 text-emerald-300" />
+                            ) : (
+                              <Video className="w-3 h-3" />
+                            )}
+                            <span>Copy Motion Prompt</span>
+                          </button>
                         ) : (
                           <span className="text-amber-500/80 flex items-center gap-1 text-[10px]">
                             <AlertCircle className="w-3 h-3" /> Missing Motion Prompt
@@ -515,6 +686,15 @@ export const ShotPlanner: React.FC<ShotPlannerProps> = ({
 
                   {/* Actions & Reordering */}
                   <div className="flex items-center justify-between md:justify-end gap-2 border-t md:border-t-0 pt-2 md:pt-0 border-zinc-800/80">
+                    <button
+                      onClick={() => onOpenShotDetail?.(shot)}
+                      className="px-2.5 py-1 text-xs text-amber-300 hover:text-black hover:bg-amber-500 bg-amber-500/10 rounded-lg border border-amber-500/30 flex items-center gap-1 transition-colors cursor-pointer"
+                      title="Open Production Workspace & Asset Manager"
+                    >
+                      <Film className="w-3.5 h-3.5" />
+                      <span>Production</span>
+                    </button>
+
                     <button
                       onClick={() => setExpandedShotId(isExpanded ? null : shot.id)}
                       className="px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-900 rounded-lg border border-zinc-800 flex items-center gap-1 cursor-pointer"

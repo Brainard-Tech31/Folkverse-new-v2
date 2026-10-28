@@ -60,6 +60,25 @@ export interface DialogueItem {
   voiceNotes?: string;
 }
 
+export type ShotProductionStatus =
+  | 'Not Started'
+  | 'Prompt Ready'
+  | 'Image Generated'
+  | 'Video Generated'
+  | 'In Review'
+  | 'Approved'
+  | 'Needs Revision';
+
+export const SHOT_PRODUCTION_STATUSES: ShotProductionStatus[] = [
+  'Not Started',
+  'Prompt Ready',
+  'Image Generated',
+  'Video Generated',
+  'In Review',
+  'Approved',
+  'Needs Revision',
+];
+
 export interface Shot {
   id: string;
   project_id: string;
@@ -78,6 +97,7 @@ export interface Shot {
   sound_effects: string[];
   music_cue: string;
   continuity_notes: string;
+  production_status?: ShotProductionStatus;
   created_at: string;
   updated_at: string;
 }
@@ -202,6 +222,7 @@ export interface CreateShotInput {
   sound_effects?: string[];
   music_cue?: string;
   continuity_notes?: string;
+  production_status?: ShotProductionStatus;
 }
 
 export interface UpdateShotInput {
@@ -220,6 +241,94 @@ export interface UpdateShotInput {
   sound_effects?: string[];
   music_cue?: string;
   continuity_notes?: string;
+  production_status?: ShotProductionStatus;
+}
+
+// ============================================================================
+// PRODUCTION ASSETS
+// ============================================================================
+
+export type AssetType =
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'character_reference'
+  | 'location_reference'
+  | 'reference_file';
+
+export const ASSET_TYPES: AssetType[] = [
+  'image',
+  'video',
+  'audio',
+  'character_reference',
+  'location_reference',
+  'reference_file',
+];
+
+export type AssetReviewStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'in_review';
+
+export const ASSET_REVIEW_STATUSES: AssetReviewStatus[] = [
+  'pending',
+  'in_review',
+  'approved',
+  'rejected',
+];
+
+export interface ProductionAsset {
+  id: string;
+  project_id: string;
+  scene_id?: string | null;
+  shot_id?: string | null;
+  asset_type: AssetType;
+  display_name: string;
+  storage_path: string;
+  mime_type: string;
+  file_size: number;
+  duration_seconds?: number | null;
+  version_number: number;
+  generation_tool?: string | null;
+  prompt_used?: string | null;
+  is_preferred: boolean;
+  review_status: AssetReviewStatus;
+  notes?: string | null;
+  is_external: boolean;
+  external_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAssetInput {
+  project_id: string;
+  scene_id?: string | null;
+  shot_id?: string | null;
+  asset_type: AssetType;
+  display_name: string;
+  storage_path?: string;
+  mime_type?: string;
+  file_size?: number;
+  duration_seconds?: number | null;
+  version_number?: number;
+  generation_tool?: string | null;
+  prompt_used?: string | null;
+  is_preferred?: boolean;
+  review_status?: AssetReviewStatus;
+  notes?: string | null;
+  is_external?: boolean;
+  external_url?: string | null;
+}
+
+export interface UpdateAssetInput {
+  display_name?: string;
+  review_status?: AssetReviewStatus;
+  is_preferred?: boolean;
+  notes?: string | null;
+  generation_tool?: string | null;
+  prompt_used?: string | null;
+  duration_seconds?: number | null;
 }
 
 // ============================================================================

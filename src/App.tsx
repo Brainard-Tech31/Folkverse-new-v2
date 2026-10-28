@@ -12,6 +12,10 @@ import type {
   Character,
   Location,
   Shot,
+  ProductionAsset,
+  ShotProductionStatus,
+  AssetType,
+  AssetReviewStatus,
   CreateProjectInput,
   UpdateProjectInput,
   CreateSceneInput,
@@ -46,6 +50,7 @@ function MainApp() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
+  const [assets, setAssets] = useState<ProductionAsset[]>([]);
 
   // Loading states
   const [isLoadingProjects, setIsLoadingProjects] = useState<boolean>(false);
@@ -54,6 +59,7 @@ function MainApp() {
   const [isLoadingCharacters, setIsLoadingCharacters] = useState<boolean>(false);
   const [isLoadingLocations, setIsLoadingLocations] = useState<boolean>(false);
   const [isLoadingShots, setIsLoadingShots] = useState<boolean>(false);
+  const [isLoadingAssets, setIsLoadingAssets] = useState<boolean>(false);
 
   // Global Notification / Error Banner
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -162,6 +168,17 @@ function MainApp() {
     } finally {
       setIsLoadingShots(false);
     }
+
+    // Load assets (Phase 4)
+    setIsLoadingAssets(true);
+    try {
+      const astList = await api.fetchProjectAssets(projectId);
+      setAssets(astList);
+    } catch (err) {
+      console.error('Failed to load project assets:', err);
+    } finally {
+      setIsLoadingAssets(false);
+    }
   }, [isConfigured, user]);
 
   useEffect(() => {
@@ -179,6 +196,7 @@ function MainApp() {
       setCharacters([]);
       setLocations([]);
       setShots([]);
+      setAssets([]);
     }
   }, [activeProject, loadProjectData]);
 
@@ -325,6 +343,85 @@ function MainApp() {
     setShots((prev) => prev.filter((sh) => sh.id !== shotId));
   };
 
+  // Phase 4: Production Workflow & Asset Management Handlers
+  const handleUpdateShotStatus = async (shotId: string, status: ShotProductionStatus) => {
+    setGlobalError(null);
+    const updated = await api.updateShotProductionStatus(shotId, status);
+    setShots((prev) => prev.map((sh) => (sh.id === shotId ? updated : sh)));
+  };
+
+  const handleUploadAssetFile = async (
+    file: File,
+    meta: {
+      shot_id?: string | null;
+      scene_id?: string | null;
+      asset_type: AssetType;
+      display_name: string;
+      generation_tool?: string;
+      prompt_used?: string;
+      notes?: string;
+      version_number?: number;
+    }
+  ) => {
+    if (!activeProject) return;
+    setGlobalError(null);
+    const created = await api.uploadAssetFile(activeProject.id, meta.shot_id || null, file, meta);
+    setAssets((prev) => [created, ...prev]);
+  };
+
+  const handleCreateExternalAsset = async (input: {
+    shot_id?: string | null;
+    scene_id?: string | null;
+    asset_type: AssetType;
+    display_name: string;
+    external_url: string;
+    generation_tool?: string;
+    prompt_used?: string;
+    notes?: string;
+    version_number?: number;
+  }) => {
+    if (!activeProject) return;
+    setGlobalError(null);
+    const created = await api.createExternalAsset({
+      ...input,
+      project_id: activeProject.id,
+    });
+    setAssets((prev) => [created, ...prev]);
+  };
+
+  const handleSetPreferredAsset = async (
+    shotId: string,
+    assetId: string,
+    assetType: AssetType
+  ) => {
+    if (!activeProject) return;
+    setGlobalError(null);
+    await api.setPreferredAsset(shotId, assetId, assetType);
+    setAssets((prev) =>
+      prev.map((a) => {
+        if (a.shot_id === shotId && a.asset_type === assetType) {
+          return { ...a, is_preferred: a.id === assetId };
+        }
+        return a;
+      })
+    );
+  };
+
+  const handleUpdateAsset = async (
+    assetId: string,
+    updates: { review_status?: AssetReviewStatus; notes?: string; display_name?: string }
+  ) => {
+    setGlobalError(null);
+    const updated = await api.updateAsset(assetId, updates);
+    setAssets((prev) => prev.map((a) => (a.id === assetId ? updated : a)));
+  };
+
+  const handleDeleteAsset = async (assetId: string) => {
+    setGlobalError(null);
+    await api.deleteAsset(assetId);
+    setAssets((prev) => prev.filter((a) => a.id !== assetId));
+  };
+
   // Blueprint Import Actions
   const handleImportNewProject = async (blueprint: FolkverseBlueprint) => {
     setGlobalError(null);
@@ -439,11 +536,13 @@ function MainApp() {
             characters={characters}
             locations={locations}
             shots={shots}
+            assets={assets}
             isLoadingScreenplay={isLoadingScreenplay}
             isLoadingScenes={isLoadingScenes}
             isLoadingCharacters={isLoadingCharacters}
             isLoadingLocations={isLoadingLocations}
             isLoadingShots={isLoadingShots}
+            isLoadingAssets={isLoadingAssets}
             onBackToProjects={() => setCurrentView('projects')}
             onSaveScreenplay={handleSaveScreenplay}
             onCreateScene={handleCreateScene}
@@ -461,6 +560,12 @@ function MainApp() {
             onReorderShots={handleReorderShots}
             onMoveShotToScene={handleMoveShotToScene}
             onDeleteShot={handleDeleteShot}
+            onUpdateShotStatus={handleUpdateShotStatus}
+            onUploadAssetFile={handleUploadAssetFile}
+            onCreateExternalAsset={handleCreateExternalAsset}
+            onSetPreferredAsset={handleSetPreferredAsset}
+            onUpdateAsset={handleUpdateAsset}
+            onDeleteAsset={handleDeleteAsset}
             onUpdateProject={handleUpdateProject}
             onDeleteProject={handleDeleteProject}
             onImportBlueprint={async (bp, mode) => {

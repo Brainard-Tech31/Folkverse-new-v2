@@ -21,6 +21,10 @@ import type {
   UpdateShotInput,
   UpdateProjectInput,
   FolkverseBlueprint,
+  ProductionAsset,
+  ShotProductionStatus,
+  AssetType,
+  AssetReviewStatus,
 } from '../types/database.ts';
 import { ScreenplayEditor } from './ScreenplayEditor.tsx';
 import { SceneManager } from './SceneManager.tsx';
@@ -28,6 +32,8 @@ import { CharacterManager } from './CharacterManager.tsx';
 import { LocationBible } from './LocationBible.tsx';
 import { ShotPlanner } from './ShotPlanner.tsx';
 import { ProductionSummary } from './ProductionSummary.tsx';
+import { ProductionDashboardView } from './ProductionDashboardView.tsx';
+import { ShotDetailModal } from './ShotDetailModal.tsx';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import { ImportBlueprintModal } from './ImportBlueprintModal.tsx';
 import { ExportBlueprintModal } from './ExportBlueprintModal.tsx';
@@ -49,6 +55,8 @@ import {
   Copy,
   Upload,
   Download,
+  Film,
+  Sparkles,
 } from 'lucide-react';
 
 interface ProjectWorkspaceViewProps {
@@ -58,11 +66,13 @@ interface ProjectWorkspaceViewProps {
   characters: Character[];
   locations: Location[];
   shots: Shot[];
+  assets: ProductionAsset[];
   isLoadingScreenplay: boolean;
   isLoadingScenes: boolean;
   isLoadingCharacters: boolean;
   isLoadingLocations: boolean;
   isLoadingShots: boolean;
+  isLoadingAssets: boolean;
   onBackToProjects: () => void;
   onSaveScreenplay: (content: string) => Promise<void>;
   onCreateScene: (input: CreateSceneInput) => Promise<void>;
@@ -80,6 +90,37 @@ interface ProjectWorkspaceViewProps {
   onReorderShots: (sceneId: string, orderedShotIds: string[]) => Promise<void>;
   onMoveShotToScene: (shotId: string, targetSceneId: string) => Promise<void>;
   onDeleteShot: (shotId: string) => Promise<void>;
+  onUpdateShotStatus: (shotId: string, status: ShotProductionStatus) => Promise<void>;
+  onUploadAssetFile: (
+    file: File,
+    meta: {
+      shot_id?: string | null;
+      scene_id?: string | null;
+      asset_type: AssetType;
+      display_name: string;
+      generation_tool?: string;
+      prompt_used?: string;
+      notes?: string;
+      version_number?: number;
+    }
+  ) => Promise<void>;
+  onCreateExternalAsset: (input: {
+    shot_id?: string | null;
+    scene_id?: string | null;
+    asset_type: AssetType;
+    display_name: string;
+    external_url: string;
+    generation_tool?: string;
+    prompt_used?: string;
+    notes?: string;
+    version_number?: number;
+  }) => Promise<void>;
+  onSetPreferredAsset: (shotId: string, assetId: string, assetType: AssetType) => Promise<void>;
+  onUpdateAsset: (
+    assetId: string,
+    updates: { review_status?: AssetReviewStatus; notes?: string; display_name?: string }
+  ) => Promise<void>;
+  onDeleteAsset: (assetId: string) => Promise<void>;
   onUpdateProject: (projectId: string, input: UpdateProjectInput) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
   onImportBlueprint: (blueprint: FolkverseBlueprint, mode: 'replace' | 'merge') => Promise<void>;
@@ -92,11 +133,13 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
   characters,
   locations,
   shots,
+  assets,
   isLoadingScreenplay,
   isLoadingScenes,
   isLoadingCharacters,
   isLoadingLocations,
   isLoadingShots,
+  isLoadingAssets,
   onBackToProjects,
   onSaveScreenplay,
   onCreateScene,
@@ -114,16 +157,23 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
   onReorderShots,
   onMoveShotToScene,
   onDeleteShot,
+  onUpdateShotStatus,
+  onUploadAssetFile,
+  onCreateExternalAsset,
+  onSetPreferredAsset,
+  onUpdateAsset,
+  onDeleteAsset,
   onUpdateProject,
   onDeleteProject,
   onImportBlueprint,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'screenplay' | 'scenes' | 'shots' | 'characters' | 'locations' | 'details'
-  >('overview');
+    'production' | 'scenes' | 'shots' | 'characters' | 'locations' | 'screenplay' | 'summary' | 'details'
+  >('production');
   const [selectedShotSceneId, setSelectedShotSceneId] = useState<string>('');
 
   // Modals
+  const [inspectingShot, setInspectingShot] = useState<Shot | null>(null);
   const [isEditingMeta, setIsEditingMeta] = useState(false);
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
@@ -173,8 +223,8 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
     setTimeout(() => setCopiedId(false), 1800);
   };
 
-  const handleJumpToShotPlanner = (sceneId: string) => {
-    setSelectedShotSceneId(sceneId);
+  const handleJumpToShotPlanner = (sceneId?: string) => {
+    if (sceneId) setSelectedShotSceneId(sceneId);
     setActiveTab('shots');
   };
 
@@ -182,6 +232,11 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
   const totalSeconds = shots.reduce((acc, sh) => acc + (Number(sh.duration_seconds) || 0), 0);
   const runtimeMins = Math.floor(totalSeconds / 60);
   const runtimeSecs = Math.round(totalSeconds % 60);
+
+  // Find updated inspecting shot if state changes
+  const activeInspectingShot = inspectingShot
+    ? shots.find((s) => s.id === inspectingShot.id) || inspectingShot
+    : null;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -231,6 +286,10 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
               <span className="text-zinc-400 font-medium text-[11px]">
                 Runtime: {runtimeMins}m {runtimeSecs}s ({shots.length} shots)
               </span>
+              <span className="text-zinc-500 text-[11px]">•</span>
+              <span className="text-cyan-400 font-medium text-[11px]">
+                {assets.length} Media Assets
+              </span>
             </div>
 
             {project.description && (
@@ -262,8 +321,8 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
 
             <button
               onClick={() => setIsEditingMeta(!isEditingMeta)}
-              className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer"
-              title="Edit Project Details"
+              className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+              title="Edit Project Settings"
             >
               <Edit3 className="w-4 h-4" />
             </button>
@@ -340,30 +399,27 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             <div>
               <label className="block text-zinc-400 mb-1">Description</label>
               <textarea
-                rows={2}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-hidden focus:border-amber-500/60 resize-none"
+                rows={2}
+                className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-hidden focus:border-amber-500/60"
               />
             </div>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setIsEditingMeta(false)}
-                className="px-3 py-1.5 text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={isSavingMeta}
-                className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold rounded-lg transition-all cursor-pointer flex items-center gap-1.5"
+                className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold rounded-lg transition-colors cursor-pointer"
               >
-                {isSavingMeta && (
-                  <div className="w-3 h-3 border-2 border-zinc-950 border-t-transparent rounded-full animate-spin" />
-                )}
-                Save Changes
+                {isSavingMeta ? 'Saving...' : 'Save Settings'}
               </button>
             </div>
           </form>
@@ -372,15 +428,24 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
         {/* Studio Navigation Tabs */}
         <div className="flex items-center gap-2 border-t border-zinc-800/80 pt-4 overflow-x-auto text-xs font-medium">
           <button
-            onClick={() => setActiveTab('overview')}
+            onClick={() => setActiveTab('production')}
             className={`px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
-              activeTab === 'overview'
+              activeTab === 'production'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md shadow-amber-950/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
             }`}
           >
-            <Layers className="w-4 h-4" />
-            <span>Production Summary</span>
+            <Film className="w-4 h-4" />
+            <span>Production Dashboard</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                activeTab === 'production'
+                  ? 'bg-zinc-950/20 text-zinc-950 font-bold'
+                  : 'bg-zinc-800 text-zinc-400'
+              }`}
+            >
+              Phase 4
+            </span>
           </button>
 
           <button
@@ -468,7 +533,19 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>Screenplay Manuscript</span>
+            <span>Screenplay</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('summary')}
+            className={`px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
+              activeTab === 'summary'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md shadow-amber-950/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            <span>Story Blueprint</span>
           </button>
 
           <button
@@ -487,14 +564,17 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
 
       {/* Workspace Tab Contents */}
       <div className="space-y-6">
-        {activeTab === 'overview' && (
-          <ProductionSummary
+        {activeTab === 'production' && (
+          <ProductionDashboardView
             project={project}
             scenes={scenes}
             shots={shots}
             characters={characters}
             locations={locations}
-            onSelectScene={handleJumpToShotPlanner}
+            assets={assets}
+            onOpenShotDetail={(sh) => setInspectingShot(sh)}
+            onJumpToScenes={() => setActiveTab('scenes')}
+            onJumpToShotPlanner={handleJumpToShotPlanner}
           />
         )}
 
@@ -520,6 +600,7 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             scenes={scenes}
             shots={shots}
             characters={characters}
+            assets={assets}
             activeSceneId={selectedShotSceneId}
             isLoading={isLoadingShots}
             onCreateShot={onCreateShot}
@@ -527,6 +608,8 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             onReorderShots={onReorderShots}
             onMoveShotToScene={onMoveShotToScene}
             onDeleteShot={onDeleteShot}
+            onOpenShotDetail={(sh) => setInspectingShot(sh)}
+            onUpdateShotStatus={onUpdateShotStatus}
           />
         )}
 
@@ -562,6 +645,17 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
             screenplay={screenplay}
             isLoading={isLoadingScreenplay}
             onSave={onSaveScreenplay}
+          />
+        )}
+
+        {activeTab === 'summary' && (
+          <ProductionSummary
+            project={project}
+            scenes={scenes}
+            shots={shots}
+            characters={characters}
+            locations={locations}
+            onSelectScene={handleJumpToShotPlanner}
           />
         )}
 
@@ -621,7 +715,7 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
               <div>
                 <h4 className="text-sm font-semibold text-red-400">Danger Zone</h4>
                 <p className="text-zinc-500 mt-0.5">
-                  Permanently delete this project and all its screenplay, scenes, shots, characters, and locations.
+                  Permanently delete this project and all its screenplay, scenes, shots, characters, locations, and production assets.
                 </p>
               </div>
               <button
@@ -635,6 +729,39 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Shot Detail & Asset Management Workspace Modal */}
+      {activeInspectingShot && (
+        <ShotDetailModal
+          isOpen={Boolean(activeInspectingShot)}
+          onClose={() => setInspectingShot(null)}
+          shot={activeInspectingShot}
+          scene={scenes.find((s) => s.id === activeInspectingShot.scene_id)}
+          characters={characters}
+          locations={locations}
+          assets={assets}
+          onUpdateShotStatus={onUpdateShotStatus}
+          onUploadAssetFile={async (file, meta) => {
+            await onUploadAssetFile(file, {
+              ...meta,
+              shot_id: activeInspectingShot.id,
+              scene_id: activeInspectingShot.scene_id,
+            });
+          }}
+          onCreateExternalAsset={async (input) => {
+            await onCreateExternalAsset({
+              ...input,
+              shot_id: activeInspectingShot.id,
+              scene_id: activeInspectingShot.scene_id,
+            });
+          }}
+          onSetPreferredAsset={async (assetId, assetType) => {
+            await onSetPreferredAsset(activeInspectingShot.id, assetId, assetType);
+          }}
+          onUpdateAsset={onUpdateAsset}
+          onDeleteAsset={onDeleteAsset}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       <ConfirmationModal
@@ -657,7 +784,6 @@ export const ProjectWorkspaceView: React.FC<ProjectWorkspaceViewProps> = ({
         activeProject={project}
         onClose={() => setImportModalOpen(false)}
         onImportNewProject={async (bp) => {
-          // Handled at App level if called
           await onImportBlueprint(bp, 'replace');
         }}
         onImportActiveProject={async (bp, mode) => {
